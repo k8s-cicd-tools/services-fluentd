@@ -1,0 +1,210 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: fluentd-configmap
+  namespace: monitoring
+data:
+  fluent.conf: |+   
+    @include "#{ENV['FLUENTD_SYSTEMD_CONF'] || 'systemd'}.conf"
+    @include "#{ENV['FLUENTD_PROMETHEUS_CONF'] || 'prometheus'}.conf"
+    @include kubernetes.conf
+    @include conf.d/*.conf
+   
+    
+    # Example:
+    # message: 2022-08-18T17:25:27.692601904Z stderr F I0818 17:25:27.692399       1 main.go:73] flushed 0 non-node ARP entries
+    # message: 2022-08-18T17:15:02.095702775Z stdout F Thanks for visiting devopscube! 378
+    # regular expression: ^(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z) (?<severity>\w+) (?<message>.*)$
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      exclude_path /var/log/containers/es-cluster*.log,/var/log/containers/fluentd*.log
+      pos_file /var/log/es-containers.log.pos
+      tag kubernetes.*       
+      <parse>
+        @type regexp
+        expression /^(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z) (?<severity>\w+) (?<message>.*)$/
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+      read_from_head true
+    </source>    
+
+    <match **>
+       @type elasticsearch
+       @id out_es
+       @log_level info
+       include_tag_key true
+       host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+       port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+       path "#{ENV['FLUENT_ELASTICSEARCH_PATH']}"
+       scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+       ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY'] || 'true'}"
+       ssl_version "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERSION'] || 'TLSv1_2'}"
+       user "#{ENV['FLUENT_ELASTICSEARCH_USER'] || use_default}"
+       password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD'] || use_default}"
+       reload_connections "#{ENV['FLUENT_ELASTICSEARCH_RELOAD_CONNECTIONS'] || 'false'}"
+       reconnect_on_error "#{ENV['FLUENT_ELASTICSEARCH_RECONNECT_ON_ERROR'] || 'true'}"
+       reload_on_failure "#{ENV['FLUENT_ELASTICSEARCH_RELOAD_ON_FAILURE'] || 'true'}"
+       log_es_400_reason "#{ENV['FLUENT_ELASTICSEARCH_LOG_ES_400_REASON'] || 'false'}"
+       logstash_prefix "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_PREFIX'] || 'logstash'}"
+       logstash_dateformat "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_DATEFORMAT'] || '%Y.%m.%d'}"
+       logstash_format "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_FORMAT'] || 'true'}"
+       index_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_INDEX_NAME'] || 'logstash'}"
+       target_index_key "#{ENV['FLUENT_ELASTICSEARCH_TARGET_INDEX_KEY'] || use_nil}"
+       type_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_TYPE_NAME'] || 'fluentd'}"
+       include_timestamp "#{ENV['FLUENT_ELASTICSEARCH_INCLUDE_TIMESTAMP'] || 'false'}"
+       template_name "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_NAME'] || use_nil}"
+       template_file "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_FILE'] || use_nil}"
+       template_overwrite "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_OVERWRITE'] || use_default}"
+       sniffer_class_name "#{ENV['FLUENT_SNIFFER_CLASS_NAME'] || 'Fluent::Plugin::ElasticsearchSimpleSniffer'}"
+       request_timeout "#{ENV['FLUENT_ELASTICSEARCH_REQUEST_TIMEOUT'] || '5s'}"
+       application_name "#{ENV['FLUENT_ELASTICSEARCH_APPLICATION_NAME'] || use_default}"
+       suppress_type_name "#{ENV['FLUENT_ELASTICSEARCH_SUPPRESS_TYPE_NAME'] || 'true'}"
+       enable_ilm "#{ENV['FLUENT_ELASTICSEARCH_ENABLE_ILM'] || 'false'}"
+       ilm_policy_id "#{ENV['FLUENT_ELASTICSEARCH_ILM_POLICY_ID'] || use_default}"
+       ilm_policy "#{ENV['FLUENT_ELASTICSEARCH_ILM_POLICY'] || use_default}"
+       ilm_policy_overwrite "#{ENV['FLUENT_ELASTICSEARCH_ILM_POLICY_OVERWRITE'] || 'false'}"
+       <buffer>
+         flush_thread_count "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_FLUSH_THREAD_COUNT'] || '8'}"
+         flush_interval "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_FLUSH_INTERVAL'] || '5s'}"
+         chunk_limit_size "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_CHUNK_LIMIT_SIZE'] || '2M'}"
+         queue_limit_length "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_QUEUE_LIMIT_LENGTH'] || '32'}"
+         retry_max_interval "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_RETRY_MAX_INTERVAL'] || '30'}"
+         retry_forever true
+       </buffer>
+    </match>
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluentd
+  namespace: monitoring
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources:
+  - namespaces
+  - pods
+  - nodes
+  verbs:
+  - get
+  - watch
+  - list
+- apiGroups: ["apps"]
+  resources:
+    - replicasets
+  verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: fluentd
+  namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: fluentd
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: fluentd
+    namespace: monitoring
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: monitoring
+  labels:
+    k8s-app: fluentd-logging
+    version: v1
+spec:
+  selector:
+    matchLabels:
+      k8s-app: fluentd-logging
+      version: v1
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd-logging
+        version: v1
+    spec:
+      serviceAccount: fluentd
+      serviceAccountName: fluentd
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      containers:
+        - name: fluentd
+          image: fluent/fluentd-kubernetes-daemonset:v1-debian-elasticsearch
+          #image: jhonwg/fluentd-kubernetes:v1.14-1.3
+          #image: gcr.io/google_containers/fluentd-elasticsearch:1.19
+          env:
+            - name: FLUENT_ELASTICSEARCH_HOST
+              value: "elasticsearch.monitoring"
+            - name: FLUENT_ELASTICSEARCH_PORT
+              value: "9200"
+            - name: FLUENT_ELASTICSEARCH_SCHEME
+              value: "http"
+            - name: FLUENTD_SYSTEMD_CONF
+              value: "disable"
+            - name: FLUENT_ELASTICSEARCH_SSL_VERIFY
+              value: "false"
+            - name: FLUENT_ELASTICSEARCH_LOGSTASH_PREFIX
+              value: "fluentd"
+            - name: FLUENT_ELASTICSEARCH_LOGSTASH_INDEX_NAME
+              value: "fluentd"
+            - name: FLUENT_ELASTICSEARCH_LOGSTASH_TYPE_NAME
+              value: "access_log"
+            - name: FLUENT_ELASTICSEARCH_USER
+              value: "elastic"
+            - name: FLUENT_ELASTICSEARCH_PASSWORD
+              value: "changeme"
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            limits:
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 200Mi
+          ports: # Exposes the port 24224 on both TCP and UDP protocol for log aggregation
+            - containerPort: 24224
+              name: fluentd-tcp
+              protocol: TCP
+            - containerPort: 24224
+              name: fluentd-udp
+              protocol: UDP
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: fluentd-configmap-volume
+              mountPath: /fluentd/etc
+              #mountPath: /tmp/etc
+            - name: dockercontainerlogdirectory
+              mountPath: /var/log/pods
+              readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: dockercontainerlogdirectory
+          hostPath:
+            path: /var/log/pods
+        - name: fluentd-configmap-volume
+          # Populate the volume with config map data
+          configMap:
+            name: fluentd-configmap
+            items:
+              - key: fluent.conf
+                path: fluent.conf
+
